@@ -1,13 +1,18 @@
 from __future__ import print_function
-import logging
 
-import requests
+import argparse
+import logging
+import os
+
 import matplotlib.pyplot as plt
 import numpy as np
+import requests
 import tablib
 
 CPI_DATA_URL = 'http://research.stlouisfed.org/fred2/data/CPIAUCSL.txt'
-class CPIDATA(object):
+
+
+class CPIData(object):
     """Abstraction of the CPI data provided by FRED
     This stores internally only one value per year
     """
@@ -60,15 +65,17 @@ class CPIDATA(object):
         """Loads CPI data from a given file-like object."""
         #When iterating over the data file we will need a handful of temporary
         #variables
+        reached_dataset = False
         current_year = None
         year_cpi = []
         for line in fp:
             #The actual content of the file starts with a header line
             #starting with the string "DATE ". Until we reach this line
             #we can skip ahead
-            while not line.startswith("DATE "):
-                pass
-
+            if not reached_dataset:
+                if line.startswith("DATE "):
+                    reached_dataset = True
+                continue
             #Each line ends with a new-line character which we strip here
             #to make the data easier usable
             data = line.rstrip().split()
@@ -206,24 +213,7 @@ class GiantbombAPI(object):
                 yield item
                 counter += 1
 
-def is_valid_dataset(platform):
-    """Filters out datasets that we can't use since they are either lacking
-    a release date or an original price. For rendering the output we also
-    require the name and abbreviation of the platform
-    """
-    if 'release_date' not in platform or not platform['release_date']:
-        logging.warn(u"{0} has no release date".format(platform['name']))
-        return False
-    if 'original_price' not in platform or not platform['original_price']:
-        logging.warn(u"{0} has no original price".format(platform['name']))
-        return False
-    if 'name' not in platform or not platform['name']:
-        logging.warn(u"No platform name found for given dataset")
-        return False
-    if 'abbreviation' not in platform or not platfor['abbreviation']:
-        logging.warn(u"{0} has no abbreviation".format(platform['name']))
-        return False
-    return True
+
 
 def generate_plot(platforms, output_file):
     """Generates a bar chart out of the given platforms and writes the output
@@ -249,12 +239,12 @@ def generate_plot(platforms, output_file):
         #the list
         if len(name) > 15:
             name = platform['abbreviation']
-        labels.insert(0, u"{0}\n$ {1}\n$ {2}".format(name, price, round(adjusted_price, 2)))
+        labels.insert(0, u"{0}\n$ {1}\n$ {2}".format(name, price, round(adapted_price, 2)))
         values.insert(0, adapted_price)
 
     #Let's define the width of each bar and the size of the resulting graph
     width = 0.3
-    ind = np.arrange(len(values))
+    ind = np.arange(len(values))
     fig = plt.figure(figsize=(len(labels) * 1.8, 10))
 
     #Generate a subplot and put our values onto it
@@ -279,7 +269,7 @@ def generate_csv(platforms, output_file):
     The output_file can either be the path to a file or a file-like object
     """
     dataset = tablib.Dataset(headers=['Abbreviation', 'Name', 'Year', 'Price', 'Adjusted_price'])
-    for p in platform:
+    for p in platforms:
         dataset.append([p['abbreviation'], p['name'], p['year'], p['original_price'], p['adjusted_price']])
 
     #If the output_file is a string it represents a path to a file which
@@ -291,19 +281,96 @@ def generate_csv(platforms, output_file):
     else:
         output_file.write(dataset.csv)
 
+def is_valid_dataset(platform):
+    """Filters out datasets that we can't use since they are either lacking
+    a release date or an original price. For rendering the output we also
+    require the name and abbreviation of the platform
+    """
+    if 'release_date' not in platform or not platform['release_date']:
+        logging.warn(u"{0} has no release date".format(platform['name']))
+        return False
+    if 'original_price' not in platform or not platform['original_price']:
+        logging.warn(u"{0} has no original price".format(platform['name']))
+        return False
+    if 'name' not in platform or not platform['name']:
+        logging.warn(u"No platform name found for given dataset")
+        return False
+    if 'abbreviation' not in platform or not platform['abbreviation']:
+        logging.warn(u"{0} has no abbreviation".format(platform['name']))
+        return False
+    return True
+
+def parse_args():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--giantbomb-api-key', required=True, help='API key provided by Giantbomb.com')
+    parser.add_argument('--cpi-file', default=os.path.join(os.path.dirname(__file__), 'CPIAUCSL.txt'), help='Path to file containing the CPI data (also acts as target file if the data has to be downloaded first).')
+    parser.add_argument('--cpi-data-url', default=CPI_DATA_URL, help='URL which should be used as CPI data source')
+    parser.add_argument('--debug', default=False, action='store_true', help='Increases the output level.')
+    parser.add_argument('--csv-file', help='Path to CSV file which should contain the data output')
+    parser.add_argument('--plot-file', help='Path to the PNG file which should contain the data output')
+    parser.add_argument('--limit', type=int, help='Number of recent platforms to be considered')
+    opts = parser.parse_args()
+    if not (opts.plot_file or opts.csv_file):
+        parser.error("You have to specify either a ---csv-file or --plot-file")
+    return opts
+
 def main():
     """This function handles the actual logic of this script"""
+    opts = parse_args()
+
+    if opts.debug:
+        logging.basicConfig(level=logging.DEBUG)
+    else:
+        logging.basicConfig(level=logging.INFO)
 
     #Grap CPI/Inflation data
+    cpi_data = CPIData()
 
     #Grab API/game platform data
+    gb_api = GiantbombAPI(opts.giantbomb_api_key)
+    print ("Disclaimer: This script uses data provided by FRED, Federal Reserve Economic Data, from the Federal Reserve Bank of St. Louis and Giantbomb.com:\n- {0}\n-http://www.giantbomb.com/api/\n".format(CPI_DATA_URL))
+
+    if os.path.exists(opts.cpi_file):
+        with open(opts.cpi_file) as fp:
+            cpi_data.load_from_file(fp)
+    else:
+        cpi_data.load_from_url(opts.cpi_data_url, save_as_file=opts.cpi_file)
 
     #Figure out the current price of each platform
     #This will require looping through each game platform we received, and
-    #calculat the adjusted price based on the CPI data we also received
+    #calculate the adjusted price based on the CPI data we also received
     #During this point, we should also validate our data so we do not skew
     #our results
+    platforms = []
+    counter = 0
+
+    for platform in gb_api.get_platforms(sort='release_date:desc', field_list=['release_date', 'original_price', 'name', 'abbreviation']):
+        #Some platforms don't have a release date or price yet. These we have to skip
+        if not is_valid_dataset(platform):
+            continue
+
+        year = int(platform['release_date'].split('-')[0])
+        price = platform['original_price']
+        adjusted_price = cpi_data.get_adjusted_price(price, year)
+        platform['year'] = year
+        platform['original_price'] = price
+        platform['adjusted_price'] = adjusted_price
+        platforms.append(platform)
+
+        #We limit the resultset on this end since we can only here check
+        #if the dataset actually contains all the data we need and therefore
+        #can't filter on the API level
+        if opts.limit is not None and counter + 1 >= opts.limit:
+            break
+        counter += 1
 
     #Generate a plot/bar graph for the adjusted price data
+    if opts.plot_file:
+        generate_plot(platforms, opts.plot_file)
 
     #Generate a CSV file to save for the adjusted price data
+    if opts.csv_file:
+        generate_csv(platforms, opts.csv_file)
+
+if __name__ == '__main__':
+    main()
